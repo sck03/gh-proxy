@@ -1,0 +1,11 @@
+name = "gh-proxy"
+main = "src/index.ts"
+compatibility_date = "2023-10-02"
+
+# 环境变量配置 (可选)
+# 默认情况下，Worker 会使用内置的 HTML 首页，不需要配置 ASSET_URL
+[vars]
+# ASSET_URL = "" 
+# PREFIX = "/"
+# JSDELIVR = "0"
+# WHITE_LIST = ""

@@ -1,0 +1,20 @@
+{
+  "name": "gh-proxy-worker",
+  "version": "1.0.0",
+  "description": "Optimized gh-proxy Cloudflare Worker",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "npx esbuild src/index.ts --bundle --outfile=dist/_worker.js --format=esm --target=es2020"
+  },
+  "keywords": ["gh-proxy", "cloudflare-workers", "proxy"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20230419.0",
+    "esbuild": "^0.17.19",
+    "typescript": "^5.0.4",
+    "wrangler": "^3.0.0"
+  }
+}
