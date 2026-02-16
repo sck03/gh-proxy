@@ -23,9 +23,6 @@ const DEFAULTS = {
   // 如果您的 Worker 部署在子路径下（例如 example.com/gh/*），请将 PREFIX 改为 '/gh/'。
   // 注意：少一个杠都会导致错误！
   PREFIX: '/',
-  
-  // 是否使用 jsDelivr 加速文件下载（默认关闭，与原版一致）
-  JSDELIVR: false, 
 
   // GitHub Personal Access Token (可选，建议只配置无权限 Token)
   // 用于解决 API 限流问题。如果环境变量中未配置，则使用此处的默认值。
@@ -34,7 +31,7 @@ const DEFAULTS = {
 
 // GitHub 官方域名正则 (用于检测和白名单)
 // 扩充域名列表以支持 releases (objects), avatars, assets, gist 等
-const GITHUB_REGEX = /^(?:www\.)?(?:github\.com|gist\.github\.com|raw\.githubusercontent\.com|gist\.githubusercontent\.com|objects\.githubusercontent\.com|assets-cdn\.github\.com|avatars\.githubusercontent\.com|api\.github\.com)$/;
+const GITHUB_REGEX = /^(?:www\.)?(?:github\.com|gist\.github\.com|raw\.githubusercontent\.com|gist\.githubusercontent\.com|objects\.githubusercontent\.com|assets-cdn\.github\.com|avatars\.githubusercontent\.com|api\.github\.com|codeload\.github\.com)$/;
 
 /**
  * 首页 HTML (内联，不依赖外部 URL)
@@ -236,17 +233,65 @@ export default {
     // 优化：处理 https:/github.com 这种少写斜杠的情况 (类似于原版 replace(/^https?:\/+/, 'https://'))
     path = path.replace(/^https?:\/+/, 'https://');
 
+    // 优化：处理 URL 编码的请求 (比如 https%3A%2F%2Fgithub.com%2F...)
+    if (path.startsWith('https%3A') || path.startsWith('http%3A')) {
+        try {
+            path = decodeURIComponent(path);
+        } catch (e) {}
+    }
+
     // 标准化 URL
     let targetUrl: URL;
     try {
         targetUrl = new URL(path);
     } catch (e) {
-        return new Response('Invalid URL', { status: 400 });
+        // 智能修正：如果 URL 解析失败 (可能是相对路径)，尝试利用 Referer 推断
+        // 场景：页面通过代理加载，页面内的相对链接 (src="/foo/bar.js") 发出的请求
+        const referer = request.headers.get('Referer');
+        if (referer) {
+            try {
+                const refererUrl = new URL(referer);
+                if (refererUrl.origin === url.origin && refererUrl.pathname.startsWith(prefix)) {
+                     // 提取 Referer 指向的真实目标路径
+                     let refererTarget = refererUrl.pathname.substring(prefix.length);
+                     // 补全协议
+                     if (!refererTarget.startsWith('http')) {
+                        if (refererTarget.match(/^(?:github|raw|gist)\./)) {
+                            refererTarget = 'https://' + refererTarget;
+                        }
+                     }
+                     const refererTargetUrl = new URL(refererTarget);
+                     // 只有当 Referer 是 GitHub 相关域名时才尝试修正
+                     if (GITHUB_REGEX.test(refererTargetUrl.hostname)) {
+                         // 构造新的目标 URL: Referer 的 Origin + 当前请求的 Path (作为相对路径)
+                         // 注意：这里假设相对路径是相对于根目录的 (以 / 开头)，这在 fetchHandler 前面已经处理过 (path.substring(1) 等)
+                         // 如果 path 是 "foo/bar"，它可能相对于 Referer 的当前目录，也可能相对于根。
+                         // 但通常 Cloudflare Worker 获取的 path 是完整的 request.url 的 pathname 部分。
+                         // 所以 path 这里已经是 /foo/bar 形式 (或 foo/bar 如果 stripped)。
+                         
+                         // 策略：使用 Referer 的 Origin 作为 Base
+                         targetUrl = new URL(path, refererTargetUrl.origin);
+                         // 重新检查是否在白名单域名内 (避免 Open Redirect)
+                         if (!GITHUB_REGEX.test(targetUrl.hostname)) {
+                             return new Response('Invalid URL: Target not allowed', { status: 400 });
+                         }
+                     } else {
+                         return new Response('Invalid URL', { status: 400 });
+                     }
+                } else {
+                    return new Response('Invalid URL', { status: 400 });
+                }
+            } catch (referErr) {
+                return new Response('Invalid URL', { status: 400 });
+            }
+        } else {
+            return new Response('Invalid URL', { status: 400 });
+        }
     }
 
     // --- 白名单检查 ---
-    const envWhiteList = env.WHITE_LIST ? env.WHITE_LIST.split(',').filter(x => x).map(x => x.trim()) : [];
-    const fullWhiteList = [...staticWhiteList, ...envWhiteList];
+    // 统一使用环境变量配置，移除重复的 staticWhiteList
+    const fullWhiteList = env.WHITE_LIST ? env.WHITE_LIST.split(',').filter(x => x).map(x => x.trim()) : [];
 
     if (fullWhiteList.length > 0) {
       const isAllowed = fullWhiteList.some(item => targetUrl.pathname.includes(item) || targetUrl.hostname.includes(item));
@@ -258,13 +303,10 @@ export default {
     // --- 核心逻辑 ---
     // 识别 GitHub URL 的类型
     const isGitHub = targetUrl.hostname === 'github.com' || targetUrl.hostname === 'www.github.com';
-    const isRaw = targetUrl.hostname === 'raw.githubusercontent.com';
-    const isGist = targetUrl.hostname === 'gist.githubusercontent.com';
     const isGistUI = targetUrl.hostname === 'gist.github.com';
-    const isApi = targetUrl.hostname === 'api.github.com';
 
-    // 如果不是 GitHub URL，且没有配置 ASSET_URL，则拒绝
-    if (!isGitHub && !isRaw && !isGist && !isGistUI && !isApi) {
+    // 如果不是 GitHub 相关域名，且没有配置 ASSET_URL，则拒绝
+    if (!GITHUB_REGEX.test(targetUrl.hostname)) {
          // 非 GitHub 请求回退到 ASSET_URL (如果配置了)
          // 注意：这里可能被用作通用代理，如果 ASSET_URL 是外部站点。
          // 但如果 ASSET_URL 为空（默认），则返回 404。
@@ -282,39 +324,28 @@ export default {
          }
     }
 
-    // 优化：处理 jsDelivr 重定向
-    const useJsDelivr = (env.JSDELIVR || (DEFAULTS.JSDELIVR ? "1" : "0")) === "1";
+    // 优化：处理 jsDelivr 重定向 (移除废弃功能)
+    // jsDelivr 不支持私有仓库，且有缓存延迟，GitHub Raw 代理更稳定
+    // 且之前的实现与 Blob 转 Raw 逻辑有重叠，精简代码移除 JSDELIVR 选项
     
-    if (useJsDelivr) {
-        // 匹配 blob
-        const blobMatch = path.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/);
-        if (blobMatch) {
-            const newUrl = `https://cdn.jsdelivr.net/gh/${blobMatch[1]}/${blobMatch[2]}@${blobMatch[3]}/${blobMatch[4]}`;
-            return Response.redirect(newUrl, 302);
-        }
-
-        // 匹配 raw
-        const rawMatch = path.match(/^(?:https?:\/\/)?raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/);
-        if (rawMatch) {
-             const newUrl = `https://cdn.jsdelivr.net/gh/${rawMatch[1]}/${rawMatch[2]}@${rawMatch[3]}/${rawMatch[4]}`;
-             return Response.redirect(newUrl, 302);
-        }
-    } else {
-        // 优化：如果不使用 jsDelivr，将 GitHub blob 页面请求转换为 raw 请求
-        if (isGitHub && targetUrl.pathname.includes('/blob/')) {
+    // 优化：将 GitHub blob 页面请求转换为 raw 请求
+    if (isGitHub && targetUrl.pathname.includes('/blob/')) {
+          // 使用正则替换，避免误伤文件名中包含 blob 的情况
+          const blobMatch = targetUrl.pathname.match(/^\/([^/]+)\/([^/]+)\/blob\/(.+)$/);
+          if (blobMatch) {
               targetUrl.hostname = 'raw.githubusercontent.com';
-              targetUrl.pathname = targetUrl.pathname.replace('/blob/', '/');
-        }
-        
-        // 优化：Gist UI 页面也转换为 raw (解决 Gist 乱码和无法直接下载问题)
-        // 示例: https://gist.github.com/username/hash -> https://gist.githubusercontent.com/username/hash/raw/
-        if (isGistUI) {
-              targetUrl.hostname = 'gist.githubusercontent.com';
-              // 确保路径末尾有 /raw/ (Gist Raw 格式通常是 /raw/文件名，如果不加文件名会自动重定向到最新文件)
-              if (!targetUrl.pathname.includes('/raw')) {
-                   targetUrl.pathname = targetUrl.pathname + '/raw/';
-              }
-        }
+              targetUrl.pathname = `/${blobMatch[1]}/${blobMatch[2]}/${blobMatch[3]}`;
+          }
+    }
+    
+    // 优化：Gist UI 页面也转换为 raw (解决 Gist 乱码和无法直接下载问题)
+    // 示例: https://gist.github.com/username/hash -> https://gist.githubusercontent.com/username/hash/raw/
+    if (isGistUI) {
+          targetUrl.hostname = 'gist.githubusercontent.com';
+          // 确保路径末尾有 /raw/ (Gist Raw 格式通常是 /raw/文件名，如果不加文件名会自动重定向到最新文件)
+          if (!targetUrl.pathname.includes('/raw')) {
+               targetUrl.pathname = targetUrl.pathname + '/raw/';
+          }
     }
 
     // 代理请求
@@ -346,30 +377,52 @@ async function proxyRequest(url: string, originalRequest: Request, prefix: strin
   headers.delete('cf-connecting-ip');
   headers.delete('x-forwarded-for');
   headers.delete('connection');
+  // 修复乱码问题：移除 Accept-Encoding，让 Worker 自动协商压缩
+  // 如果透传了 gzip/br，但 Worker 自动解压了 body，却没移除 Content-Encoding 响应头，浏览器会再次解压导致乱码
+  // 主动移除请求头是最安全的做法
+  headers.delete('accept-encoding');
   
   if (!headers.has('User-Agent')) {
       headers.set('User-Agent', 'Mozilla/5.0 (compatible; gh-proxy/1.0)');
   }
 
   // 优化：处理 API Rate Limit (API 限流)
-  // 如果环境变量中配置了 GH_TOKEN，且请求中没有 Authorization 头，则自动添加
-  if (ghToken && !headers.has('Authorization')) {
-      headers.set('Authorization', `token ${ghToken}`);
-  }
+    // 如果环境变量中配置了 GH_TOKEN，且请求中没有 Authorization 头，则自动添加
+    // 注意：objects.githubusercontent.com (Release 附件下载) 和 codeload.github.com (Source Code 下载) 通常使用 URL 签名鉴权
+    // 如果注入额外的 Authorization 头，可能会导致 400 Bad Request 或 403 Forbidden (Only one auth mechanism allowed)
+    const isSignedUrl = url.includes('objects.githubusercontent.com') || url.includes('codeload.github.com') || url.includes('actions-results-receiver-production');
+    
+    // 如果是签名 URL，强制移除 Authorization 头 (防止客户端自带 Token 导致冲突)
+    if (isSignedUrl) {
+        headers.delete('Authorization');
+    } else {
+        if (ghToken && !headers.has('Authorization')) {
+            headers.set('Authorization', `token ${ghToken}`);
+        }
+    }
 
-  try {
-    const response = await fetch(url, {
-      method: originalRequest.method,
-      headers: headers,
-      body: originalRequest.body,
-      redirect: 'manual', // 手动处理重定向
-    });
+    // 优化：处理 fetch body
+    // GET 和 HEAD 请求不应包含 body，否则 Cloudflare Worker 会报错
+    const reqInit: RequestInit = {
+        method: originalRequest.method,
+        headers: headers,
+        redirect: 'manual', 
+    };
+    if (!['GET', 'HEAD'].includes(originalRequest.method.toUpperCase()) && originalRequest.body) {
+        reqInit.body = originalRequest.body;
+    }
+
+    try {
+        const response = await fetch(url, reqInit);
 
     const newHeaders = new Headers(response.headers);
     newHeaders.set('Access-Control-Allow-Origin', '*');
     newHeaders.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,TRACE,DELETE,HEAD,OPTIONS');
     newHeaders.set('Access-Control-Allow-Headers', '*');
     newHeaders.set('Access-Control-Expose-Headers', '*'); // 原版有这个
+    
+    // 优化：增加 Strict-Transport-Security 头 (HSTS)
+    newHeaders.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
     
     // 移除 CSP 和 Clear-Site-Data (防止 GitHub 的安全策略影响代理后的页面)
     newHeaders.delete('content-security-policy');
@@ -411,7 +464,11 @@ async function proxyRequest(url: string, originalRequest: Request, prefix: strin
                     // 如果是外部重定向（例如 S3, 非 GitHub），则在 Worker 内部跟随跳转（代理）
                     // 这保持了“不作为通用代理”的原则（只有 GitHub 的跳转才被允许作为代理结果返回）
                     // 但为了避免滥用，我们只跟随，不返回 302 给用户让用户去访问外部
-                    return proxyRequest(locUrl.toString(), originalRequest, prefix, redirectCount + 1, ghToken);
+                    // 优化：传递状态码，确保 301/302/307/308 都能正确处理 (参考 hunshcn/gh-proxy)
+                    // 如果上游返回 301/302/303/307/308，我们递归代理新的地址
+                    if ([301, 302, 303, 307, 308].includes(response.status)) {
+                         return proxyRequest(locUrl.toString(), originalRequest, prefix, redirectCount + 1, ghToken);
+                    }
                 }
             } catch (e) {
                 console.error('Redirect parse error:', e);
