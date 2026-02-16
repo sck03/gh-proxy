@@ -54,7 +54,6 @@
 | `PREFIX` | 路径前缀。如果你的 Worker 部署在子路径下，请设置此项。程序会自动处理斜杠。 | `/` | `/gh/` |
 | `WHITE_LIST` | 访问白名单。如果设置，只有包含这些关键词的路径才允许访问。多个关键词用英文逗号 `,` 分隔。 | (空) | `username,repo-name` |
 | `GH_TOKEN` | GitHub Personal Access Token。用于解决 API 请求限流问题 (`API rate limit exceeded`)。建议使用无权限的 Token。 | (空) | `ghp_xxxx` |
-| `JSDELIVR` | 文件加速切换。设置为 `1` 时，Raw 文件下载将尝试重定向到 jsDelivr。 | `0` | `1` |
 
 ---
 
@@ -64,8 +63,11 @@
 A: 这是因为 GitHub 对未授权请求的 IP 限流。
    - **解决**: 申请一个无权限的 [GitHub Personal Access Token](https://github.com/settings/tokens)，然后在 Cloudflare 环境变量中添加 `GH_TOKEN`，值为你的 Token。
 
-**Q: `git clone` 时报错 `RPC failed; curl 92 HTTP/2 stream 0 was not closed cleanly`？**
-A: 这是由于 HTTP/2 协议兼容性问题导致的。本版本已针对此问题进行了优化（移除 `Content-Encoding` 等干扰头），请确保使用最新版本的代码。
+**Q: `git clone` 时报错 `RPC failed` 或 Gist 乱码？**
+A: 本项目已针对这些问题进行了深度优化：
+   - **Git Clone**: 自动清理干扰 Git 客户端的 HTTP 头。
+   - **Gist 乱码**: 强制上游返回明文，由 Cloudflare 自动处理压缩，彻底解决乱码。
+   - **S3 签名错误**: 自动在访问 Release 附件时禁用 Token 注入，防止 AWS 鉴权冲突。
 
 **Q: 使用 PREFIX (如 `/gh/`) 浏览 GitHub 页面时，为何有时会报错或一直加载？**
-A: 这是一个已知限制。建议将 Worker 部署在根目录（`PREFIX` 设为 `/`）以获得最佳体验。
+A: 这是一个已知限制。建议将 Worker 部署在根目录（`PREFIX` 设为 `/`）以获得最佳体验。但最新版已加入 Referer 智能修正，能自动修复部分相对路径引用错误。
