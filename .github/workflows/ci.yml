@@ -24,6 +24,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - name: Install browser for page regression tests
+        run: npx playwright-core install --with-deps chromium
+      - run: npm run test:browser
       - name: Verify build preserves the editable source
         run: git diff --exit-code -- index.js
       - name: Validate Workers deployment bundle

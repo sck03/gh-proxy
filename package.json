@@ -13,7 +13,8 @@
     "deploy": "wrangler deploy",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test",
+    "test": "npm run build && node --test tests/worker.test.mjs tests/runtime.test.mjs",
+    "test:browser": "npm run build && node --test tests/browser.test.mjs",
     "check": "npm run typecheck && npm test"
   },
   "keywords": ["gh-proxy", "cloudflare-workers", "proxy"],
@@ -23,6 +24,7 @@
     "@cloudflare/workers-types": "5.20261014.1",
     "esbuild": "0.28.2",
     "miniflare": "5.20261012.0-beta",
+    "playwright-core": "1.64.1",
     "typescript": "5.9.3",
     "wrangler": "4.151.0"
   }

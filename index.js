@@ -279,6 +279,142 @@ async function discard(response) {
   await response.body?.cancel().catch(() => {});
 }
 
+// -------------------- GitHub 网页路径适配 --------------------
+
+// 仅注入到浏览器打开的 GitHub HTML 页面；文件、API 和 Git 数据不经过这里。
+// GitHub 的路由器从 document.defaultView 读取路径，需要看到 /用户名/仓库，
+// 而地址栏、实际请求和历史记录仍然保留 /gh/https://github.com/ 前缀。
+const PAGE_ADAPTER = String.raw`(prefix, initialTarget, hosts) => {
+  const origin = location.origin;
+  const allowedHosts = new Set(hosts);
+  const replaceState = history.replaceState.bind(history);
+  replaceState(history.state, '', prefix + initialTarget + location.hash);
+
+  function upstreamLocation() {
+    return new URL(location.pathname.slice(prefix.length) + location.search + location.hash);
+  }
+
+  function pageLocation() {
+    const upstream = upstreamLocation();
+    return new URL(upstream.pathname + upstream.search + upstream.hash, origin);
+  }
+
+  function proxyURL(value) {
+    const url = new URL(value, pageLocation());
+    if (url.origin === origin) {
+      if (url.pathname.startsWith(prefix + 'https://')) return url.href;
+      const upstream = upstreamLocation();
+      url.protocol = upstream.protocol;
+      url.host = upstream.host;
+      url.port = upstream.port;
+    }
+    return url.protocol === 'https:' && !url.port && !url.username && !url.password && allowedHosts.has(url.hostname)
+      ? origin + prefix + url.href : url.href;
+  }
+
+  // React/Turbo 的前端跳转也必须写入完整代理地址，刷新、前进和后退才能继续使用。
+  for (const name of ['pushState', 'replaceState']) {
+    const original = history[name].bind(history);
+    history[name] = (state, unused, url) => original(state, unused, url == null ? url : proxyURL(url));
+  }
+
+  const view = new Proxy(window, {
+    get(target, key) {
+      if (key === 'location') return pageLocation();
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' && !Object.hasOwn(value, 'prototype') ? value.bind(target) : value;
+    },
+  });
+  Object.defineProperty(document, 'defaultView', { configurable: true, get: () => view });
+
+  // 提交说明、分支数量和目录内容通过后续请求加载，不能只改写静态 HTML 链接。
+  // 在 Request 创建前转换地址，保留字符串/Blob 请求体，避免克隆后变成仅 HTTP/2 支持的流式上传。
+  const NativeRequest = window.Request;
+  window.Request = new Proxy(NativeRequest, {
+    construct(target, args, newTarget) {
+      if (!(args[0] instanceof NativeRequest)) args[0] = proxyURL(args[0]);
+      return Reflect.construct(target, args, newTarget);
+    },
+  });
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    if (!(input instanceof NativeRequest)) return originalFetch(proxyURL(input), init);
+    const url = proxyURL(input.url);
+    return originalFetch(url === input.url ? input : new NativeRequest(url, input), init);
+  };
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (...args) {
+    args[1] = proxyURL(args[1]);
+    return Reflect.apply(originalOpen, this, args);
+  };
+
+  // React 后续生成的链接和表单同样保留代理路径，支持普通点击及新标签页打开。
+  function rewriteLink(event) {
+    const link = event.target instanceof Element ? event.target.closest('a[href], area[href]') : null;
+    if (link) link.setAttribute('href', proxyURL(link.getAttribute('href')));
+  }
+  document.addEventListener('click', rewriteLink, true);
+  document.addEventListener('auxclick', rewriteLink, true);
+  document.addEventListener('submit', event => {
+    const form = event.target;
+    if (form instanceof HTMLFormElement) form.action = proxyURL(form.getAttribute('action') || pageLocation().href);
+    if (event.submitter?.hasAttribute('formaction')) event.submitter.formAction = proxyURL(event.submitter.getAttribute('formaction'));
+  }, true);
+}`;
+
+/**
+ * @param {Request} request
+ * @param {URL} target
+ */
+function isPageRequest(request, target) {
+  const destination = request.headers.get('sec-fetch-dest');
+  return request.method === 'GET' && ['github.com', 'www.github.com'].includes(target.hostname) &&
+    request.headers.get('accept')?.includes('text/html') && !request.headers.has('range') &&
+    (!destination || destination === 'document' || destination === 'iframe');
+}
+
+/**
+ * 流式改写网页并在 GitHub 脚本之前注入路径适配，不读取整个响应体。
+ * @param {Response} response
+ * @param {Request} request
+ * @param {URL} target
+ * @param {string} prefix
+ */
+function adaptPage(response, request, target, prefix) {
+  if (!isPageRequest(request, target) || response.status !== 200 || !response.body ||
+      !/^text\/html(?:;|$)/i.test(response.headers.get('content-type') || '') ||
+      response.headers.has('content-disposition') ||
+      /\bbr\b/i.test(response.headers.get('content-encoding') || '')) {
+    return response;
+  }
+
+  // 内容已改变，不能继续使用原 HTML 的压缩大小、校验值或范围信息。
+  for (const name of ['content-encoding', 'content-length', 'etag', 'last-modified', 'content-md5', 'digest', 'accept-ranges']) {
+    response.headers.delete(name);
+  }
+  response.headers.set('cache-control', 'no-store');
+
+  const config = JSON.stringify([prefix, target.href, [...ALLOWED_HOSTS]]).replace(/</g, '\\u003c');
+  const script = `<script>(${PAGE_ADAPTER})(...${config});</script>`;
+  const origin = new URL(request.url).origin;
+  return new HTMLRewriter()
+    .on('head', { element(element) { element.prepend(script, { html: true }); } })
+    .on('a[href], area[href], link[href], script[src], img[src], source[src], form[action], input[src], video[poster]', {
+      element(element) {
+        for (const name of ['href', 'src', 'action', 'poster']) {
+          const value = element.getAttribute(name);
+          if (value === null) continue;
+          try {
+            const url = new URL(value, target);
+            if (allowed(url)) element.setAttribute(name, origin + prefix + url.href);
+          } catch {
+            // 保留无效或不受支持的地址，由浏览器按原页面处理。
+          }
+        }
+      },
+    }).transform(response);
+}
+
 // -------------------- 代理传输 --------------------
 
 /**
@@ -317,6 +453,11 @@ async function proxy(target, request, env, prefix) {
   }
 
   const authenticated = headers.has('authorization');
+  const acceptEncoding = headers.get('accept-encoding');
+  const validators = {
+    'if-none-match': headers.get('if-none-match'),
+    'if-modified-since': headers.get('if-modified-since'),
+  };
   if (authenticated) {
     headers.set('cache-control', 'no-store');
   }
@@ -331,6 +472,16 @@ async function proxy(target, request, env, prefix) {
   const timer = setTimeout(() => timeout.abort(), timeoutMs);
   try {
     for (let redirects = 0; ; redirects++) {
+      const pageRequest = isPageRequest(request, target);
+      // 旧兼容日期不能解码 Brotli HTML。页面协商 gzip，下载仍保留客户端的压缩协商。
+      if (pageRequest) headers.set('accept-encoding', 'gzip');
+      else if (acceptEncoding !== null) headers.set('accept-encoding', acceptEncoding);
+      else headers.delete('accept-encoding');
+      // 避免 304 让浏览器继续使用升级前、没有路径适配的 HTML 缓存。
+      for (const [name, value] of Object.entries(validators)) {
+        if (pageRequest || value === null) headers.delete(name);
+        else headers.set(name, value);
+      }
       const response = await fetch(target.href, {
         method: request.method,
         headers,
@@ -380,12 +531,12 @@ async function proxy(target, request, env, prefix) {
         continue;
       }
 
-      // 原样返回流和压缩头，避免无意义的解压、重压缩及大文件缓冲。
-      return new Response(response.body, {
+      // 下载保持原始流和压缩头；仅在浏览器请求 GitHub 网页时适配 HTML。
+      return adaptPage(new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
         headers: responseHeaders(response, authenticated),
-      });
+      }), request, target, prefix);
     }
   } catch {
     if (request.signal.aborted) {

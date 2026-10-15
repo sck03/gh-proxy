@@ -1,6 +1,6 @@
 # gh-proxy
 
-基于 [hunshcn/gh-proxy](https://github.com/hunshcn/gh-proxy) 改进的 GitHub 文件代理，可部署到 Cloudflare Workers 或 Pages。支持 Git clone/fetch、Raw 文件、Release 附件、源码压缩包、Gist 和 GitHub API。
+基于 [hunshcn/gh-proxy](https://github.com/hunshcn/gh-proxy) 改进的 GitHub 代理，可部署到 Cloudflare Workers 或 Pages。支持公开仓库网页浏览、Git clone/fetch、Raw 文件、Release 附件、源码压缩包、Gist 和 GitHub API。
 
 ## 最简单的用法：修改顶部配置，复制即可部署
 
@@ -43,7 +43,21 @@ git clone https://你的域名/gh/https://github.com/owner/repo.git
 https://你的域名/https://github.com/owner/repo/releases/download/v1.0/file.zip
 ```
 
-也支持省略目标协议，以及将整个目标 URL 编码一次的链接。普通链接中的路径编码、查询参数和下载签名保持原样。`blob` 文件地址和 Gist 文件页面会转换为 Raw 地址；GitHub 完整网页的脚本、登录和相对链接不保证兼容。
+也支持省略目标协议，以及将整个目标 URL 编码一次的链接。普通链接中的路径编码、查询参数和下载签名保持原样。`blob` 文件地址和 Gist 文件页面会转换为 Raw 地址。
+
+### 公开仓库网页
+
+可以直接打开带代理前缀的仓库地址，例如：
+
+```text
+https://你的域名/gh/https://github.com/sck03/gh-proxy
+```
+
+网页会自动适配代理路径，让最新提交、各文件的提交说明与时间、分支数量等后续内容正常加载。目录切换、刷新、前进后退和新标签页打开均保留代理前缀；无需增加配置。
+
+本功能面向公开内容的匿名浏览，GitHub 登录及需要账户权限的操作不受支持。网页功能可能随 GitHub 前端更新而变化；`blob` 链接仍保持原项目的 Raw 下载行为。
+
+如果之前手动复制代码部署，更新时同样将新版 `index.js` 全部复制到 Worker 编辑器并部署即可，继续保留你自己的顶部配置。只更新 GitHub 仓库不会自动更新手动部署的 Worker；连接 Git 自动部署的 Pages 则等待构建完成。
 
 ## 可选：自动部署或本地开发
 
@@ -94,6 +108,7 @@ npm run deploy
 ## 传输与错误处理
 
 - 请求体和响应体直接流式传输，不整包读取或复制大文件；保留 `Content-Encoding`、`Content-Length`、Range、ETag 和上游缓存语义，避免不必要的解压、重压缩。
+- 浏览器打开的 GitHub HTML 使用 `HTMLRewriter` 流式适配链接并加入页面路径脚本；为兼容旧运行时协商 gzip，清除改写后失效的大小、校验值和缓存。Raw、附件、API、Git、HEAD 和 Range 响应保持原样。
 - GET/HEAD 在 Worker 内跟随最多 5 次受信任跳转，并取消丢弃的响应体；每一跳都校验 HTTPS、端口和完整域名。拒绝 URL 内嵌用户名或密码。
 - 带请求体的方法保留上游 301/302/303/307/308 状态，将 Location 改写为代理路径，由客户端处理重定向和请求体重发。
 - 清理 Cookie、Referer、客户端转发 IP、逐跳请求头，以及上游 Set-Cookie；所有本地错误都带 CORS 响应头。错误正文不回显请求 URL、签名或 Token。
@@ -105,9 +120,13 @@ npm run deploy
 
 [index.js](index.js) 是唯一维护的源码，保留中文注释和可编辑的配置区。`npm run build` 只生成 `dist/_worker.js`，**不会覆盖或改写 `index.js`**。手动部署直接复制 `index.js`；Pages 自动部署使用构建产物。历史实现可通过 Git 历史查看。
 
-`npm run check` 对 JavaScript 源码执行严格类型检查、构建和自动化测试，覆盖代码配置、可选环境变量、`/gh/` 和根路径、URL、白名单、Token、Git 请求体、重定向、压缩、断点续传、超时和取消。测试中的上游均为本地模拟，不需要 GitHub 或 Cloudflare 凭据。CI 分别验证新旧兼容日期，并执行 Wrangler 部署预检。
+`npm run check` 对 JavaScript 源码执行严格类型检查、构建和自动化测试，覆盖代码配置、可选环境变量、`/gh/` 和根路径、URL、白名单、Token、Git 请求体、重定向、压缩、HTML 改写、断点续传、超时和取消。`npm run test:browser` 另外验证页面初始化、异步内容、目录切换、刷新、前进后退、新标签页、表单和多级前缀。测试中的上游均为本地模拟，不需要 GitHub 或 Cloudflare 凭据。CI 分别验证新旧兼容日期，并执行 Wrangler 部署预检。
 
 ```sh
 npm run check
+npx playwright-core install chromium
+npm run test:browser
 npx wrangler deploy --dry-run --outdir dist/wrangler
 ```
+
+浏览器测试也可以使用已安装的 Windows Edge/Chrome，或通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定可执行文件；这些开发工具不影响直接复制部署。

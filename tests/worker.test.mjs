@@ -221,6 +221,24 @@ test('resolves relative redirects and retains same-origin authentication', async
   assert.match(calls[1].headers.get('authorization'), /server-token$/);
 });
 
+test('refreshes adapted pages but preserves download encoding and validators after a redirect', async (t) => {
+  const calls = upstream(t, (_, count) => count === 1
+    ? new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/file' } })
+    : new Response(null, { status: 304, headers: { etag: '"download"' } }));
+  const response = await fetchAtRoot(request('/https://github.com/owner/repo/releases/download/v1/file', { headers: {
+    accept: 'text/html', 'accept-encoding': 'br, gzip', 'if-none-match': '"download"',
+    'if-modified-since': 'Wed, 14 Oct 2026 00:00:00 GMT',
+  } }));
+  assert.equal(calls[0].headers.get('accept-encoding'), 'gzip');
+  assert.equal(calls[0].headers.get('if-none-match'), null);
+  assert.equal(calls[0].headers.get('if-modified-since'), null);
+  assert.equal(calls[1].headers.get('accept-encoding'), 'br, gzip');
+  assert.equal(calls[1].headers.get('if-none-match'), '"download"');
+  assert.equal(calls[1].headers.get('if-modified-since'), 'Wed, 14 Oct 2026 00:00:00 GMT');
+  assert.equal(response.status, 304);
+  assert.equal(response.headers.get('etag'), '"download"');
+});
+
 test('rejects untrusted redirects and redirect loops without leaking URLs or tokens', async (t) => {
   let destination = 'https://evil.example/?secret=token';
   const calls = upstream(t, () => new Response(null, { status: 302, headers: { location: destination } }));

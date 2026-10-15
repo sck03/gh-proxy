@@ -55,6 +55,64 @@ test('Cloudflare runtime transfers bytes correctly', { timeout: 60_000 }, async 
     });
   }
 
+  for (const encoding of ['gzip', 'br']) {
+    await t.test(`adapts GitHub HTML for ${encoding} clients before its scripts without stale metadata`, async () => {
+      const html = '<!doctype html><html><head><script src="https://github.githubassets.com/app.js"></script></head>' +
+        '<body><a href="/owner/repo/tree/main">目录</a><a href="https://example.com/">external</a></body></html>';
+      const encoded = gzipSync(Buffer.from(html));
+      serve = (request, response) => {
+        assert.equal(request.headers['accept-encoding'], 'gzip');
+        assert.equal(request.headers['if-none-match'], undefined);
+        assert.equal(request.headers['if-modified-since'], undefined);
+        response.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8', 'content-encoding': 'gzip', 'content-length': encoded.length,
+          etag: '"original-html"', 'last-modified': 'Wed, 14 Oct 2026 00:00:00 GMT',
+          'content-md5': 'original', digest: 'original', 'accept-ranges': 'bytes', 'cache-control': 'public, max-age=600',
+        });
+        response.end(encoded);
+      };
+      const result = await wireRequest(base, '/https://github.com/owner/repo', { headers: {
+        accept: 'text/html', 'accept-encoding': encoding, 'if-none-match': '"original-html"',
+        'if-modified-since': 'Wed, 14 Oct 2026 00:00:00 GMT',
+      } });
+      const decoded = result.headers['content-encoding'] === 'gzip' ? gunzipSync(result.body)
+        : result.headers['content-encoding'] === 'br' ? brotliDecompressSync(result.body) : result.body;
+      const body = decoded.toString();
+      assert.equal(result.status, 200);
+      assert.match(body, /Object\.defineProperty\(document, 'defaultView'/);
+      assert.ok(body.indexOf('Object.defineProperty') < body.indexOf('src='));
+      assert.ok(body.includes(`${base.origin}/https://github.githubassets.com/app.js`));
+      assert.ok(body.includes(`${base.origin}/https://github.com/owner/repo/tree/main`));
+      assert.ok(body.includes('href="https://example.com/"'));
+      assert.equal(result.headers['cache-control'], 'no-store');
+      for (const name of ['etag', 'last-modified', 'content-md5', 'digest', 'accept-ranges']) assert.equal(result.headers[name], undefined);
+      assert.notEqual(result.headers['content-length'], String(encoded.length));
+    });
+  }
+
+  await t.test('keeps HTML downloads, partial responses, HEAD and fetch fragments unchanged', async () => {
+    const html = Buffer.from('<html><head></head><body>unchanged</body></html>');
+    const encoded = gzipSync(html);
+    for (const [target, requestHeaders, responseHeaders, method, status] of [
+      ['/https://raw.githubusercontent.com/owner/repo/main/page.html', {}, {}, 'GET', 200],
+      ['/https://github.com/owner/repo', {}, { 'content-disposition': 'attachment; filename="page.html"' }, 'GET', 200],
+      ['/https://github.com/owner/repo', { range: 'bytes=0-30' }, { 'content-range': 'bytes 0-30/100' }, 'GET', 206],
+      ['/https://github.com/owner/repo', { 'sec-fetch-dest': 'empty' }, {}, 'GET', 200],
+      ['/https://github.com/owner/repo', {}, {}, 'HEAD', 200],
+    ]) {
+      serve = (_request, response) => {
+        response.writeHead(status, { 'content-type': 'text/html', 'content-encoding': 'gzip', 'content-length': encoded.length, etag: '"file"', ...responseHeaders });
+        response.end(method === 'HEAD' ? undefined : encoded);
+      };
+      const result = await wireRequest(base, target, { method, headers: { accept: 'text/html', 'accept-encoding': 'gzip', ...requestHeaders } });
+      assert.equal(result.status, status);
+      assert.equal(result.headers['content-encoding'], 'gzip');
+      assert.equal(result.headers['content-length'], String(encoded.length));
+      assert.equal(result.headers.etag, '"file"');
+      assert.deepEqual(result.body, method === 'HEAD' ? Buffer.alloc(0) : encoded);
+    }
+  });
+
   await t.test('preserves HEAD, partial content and conditional requests', async () => {
     serve = (request, response) => {
       const headers = { 'content-type': 'application/octet-stream', 'accept-ranges': 'bytes', etag: '"version-1"' };
