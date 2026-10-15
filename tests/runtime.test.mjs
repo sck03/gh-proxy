@@ -198,6 +198,64 @@ test('Cloudflare runtime transfers bytes correctly', { timeout: 60_000 }, async 
     assert.deepEqual(result.body, plaintext);
   });
 
+  await t.test('streams GitLab raw files and Git uploads with scoped credentials', async () => {
+    const compressed = gzipSync(plaintext);
+    serve = (request, response) => {
+      assert.match(request.url, /\/team\/sub\/project\/-\/raw\/main\/file\.txt$/);
+      assert.equal(request.headers['private-token'], 'test-only-gitlab-token');
+      assert.equal(request.headers.authorization, undefined);
+      response.writeHead(200, { 'content-type': 'text/plain', 'content-encoding': 'gzip', 'content-length': compressed.length, etag: '"raw"' });
+      response.end(compressed);
+    };
+    const file = await wireRequest(base, '/https://gitlab.com/team/sub/project/-/blob/main/file.txt', {
+      headers: { accept: 'text/html', 'accept-encoding': 'gzip', 'private-token': 'test-only-gitlab-token' },
+    });
+    assert.equal(file.status, 200);
+    assert.deepEqual(file.body, compressed);
+    assert.equal(file.headers.etag, '"raw"');
+    assert.equal(file.headers['content-length'], String(compressed.length));
+    assert.equal(file.headers['cache-control'], 'private, no-store');
+
+    let received;
+    serve = async (request, response) => {
+      assert.match(request.url, /\/team\/sub\/project\.git\/git-upload-pack$/);
+      assert.equal(request.headers.authorization, 'Basic test-only-gitlab-credential');
+      assert.equal(request.headers['git-protocol'], 'version=2');
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      received = Buffer.concat(chunks);
+      response.writeHead(200, { 'content-type': 'application/x-git-upload-pack-result', 'content-length': plaintext.length });
+      response.end(plaintext);
+    };
+    const git = await wireRequest(base, '/https://gitlab.com/team/sub/project.git/git-upload-pack', {
+      method: 'POST', body: compressed,
+      headers: { authorization: 'Basic test-only-gitlab-credential', 'git-protocol': 'version=2', 'content-encoding': 'gzip' },
+    });
+    assert.equal(git.status, 200);
+    assert.deepEqual(received, compressed);
+    assert.deepEqual(git.body, plaintext);
+  });
+
+  await t.test('resolves git.io to a GitLab raw file without forwarding credentials', async () => {
+    serve = (request, response) => {
+      assert.equal(request.headers.authorization, undefined);
+      assert.equal(request.headers['private-token'], undefined);
+      if (request.url.endsWith('/ExistingCode')) {
+        response.writeHead(301, { location: 'https://gitlab.com/team/project/-/blob/main/file.txt' });
+        response.end();
+      } else {
+        assert.match(request.url, /\/team\/project\/-\/raw\/main\/file\.txt$/);
+        response.writeHead(200, { 'content-length': plaintext.length });
+        response.end(plaintext);
+      }
+    };
+    const result = await wireRequest(base, '/https://git.io/ExistingCode', {
+      headers: { authorization: 'Bearer caller-token', 'private-token': 'test-only-gitlab-token' },
+    });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, plaintext);
+  });
+
   await t.test('the copied JavaScript serves /gh/ without environment variables', async (t) => {
     const manual = new Miniflare(convertV4MiniflareOptions({
       modules: true,

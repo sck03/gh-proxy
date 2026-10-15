@@ -1,6 +1,6 @@
 # gh-proxy
 
-基于 [hunshcn/gh-proxy](https://github.com/hunshcn/gh-proxy) 改进的 GitHub 代理，可部署到 Cloudflare Workers 或 Pages。支持公开仓库网页浏览、Git clone/fetch、Raw 文件、Release 附件、源码压缩包、Gist 和 GitHub API。
+基于 [hunshcn/gh-proxy](https://github.com/hunshcn/gh-proxy) 改进的 GitHub/GitLab 文件代理，可部署到 Cloudflare Workers 或 Pages。支持 GitHub 公开仓库网页浏览、Git clone/fetch、Raw 文件、Release 附件、源码压缩包、Gist、GitHub/GitLab API，以及 `git.io` 短链解析。
 
 ## 最简单的用法：修改顶部配置，复制即可部署
 
@@ -44,6 +44,29 @@ https://你的域名/https://github.com/owner/repo/releases/download/v1.0/file.z
 ```
 
 也支持省略目标协议，以及将整个目标 URL 编码一次的链接。普通链接中的路径编码、查询参数和下载签名保持原样。`blob` 文件地址和 Gist 文件页面会转换为 Raw 地址。
+
+### GitLab.com 和 git.io
+
+不用增加配置，直接使用同一个代理前缀：
+
+```text
+https://你的域名/gh/https://git.io/短码
+https://你的域名/gh/https://gitlab.com/group/project/-/raw/main/README.md
+https://你的域名/gh/https://gitlab.com/group/subgroup/project/-/blob/main/README.md
+https://你的域名/gh/https://gitlab.com/group/project/-/archive/main/project-main.tar.gz
+https://你的域名/gh/https://gitlab.com/api/v4/projects/group%2Fproject
+```
+
+```sh
+git clone https://你的域名/gh/https://gitlab.com/group/project.git
+```
+
+- GitLab 支持多级子组；`/-/blob/` 文件链接自动转换为 `/-/raw/`，分支、文件名和 API 项目路径的编码保持原样。
+- `git.io` 自动解析仍有效的短链，再按目标处理下载。开启白名单时，检查解析后的仓库地址；短码和查询参数不能绕过过滤。
+- `GH_TOKEN` 仍只用于 GitHub API，不会发送给 GitLab 或 `git.io`。GitLab 客户端可自行携带 `Authorization`、`Private-Token`、`Job-Token` 或 `Deploy-Token`；专用头仅发往 `gitlab.com`，跨域跳转时清除鉴权，鉴权响应不共享缓存。
+- 这里支持的是 `gitlab.com` 的文件、Git 协议和 API；自建 GitLab 域名及外部附件站点不会自动放行。网页路径增强目前面向 GitHub 公开仓库。
+
+2026-10-15 实测：GitLab Raw、文件页转换、API、Git 读取和 Range 下载通过。测试仓库的压缩包接口直连及代理均返回 `406 Not Acceptable`，尚未验证其成功下载；代理保留上游状态。
 
 ### 公开仓库网页
 
@@ -110,7 +133,7 @@ npm run deploy
 - 请求体和响应体直接流式传输，不整包读取或复制大文件；保留 `Content-Encoding`、`Content-Length`、Range、ETag 和上游缓存语义，避免不必要的解压、重压缩。
 - 浏览器打开的 GitHub HTML 使用 `HTMLRewriter` 流式适配链接并加入页面路径脚本；为兼容旧运行时协商 gzip，清除改写后失效的大小、校验值和缓存。Raw、附件、API、Git、HEAD 和 Range 响应保持原样。
 - GET/HEAD 在 Worker 内跟随最多 5 次受信任跳转，并取消丢弃的响应体；每一跳都校验 HTTPS、端口和完整域名。拒绝 URL 内嵌用户名或密码。
-- 带请求体的方法保留上游 301/302/303/307/308 状态，将 Location 改写为代理路径，由客户端处理重定向和请求体重发。
+- 带请求体的方法保留上游 301/302/303/307/308 状态，将 Location 改写为代理路径，由客户端处理重定向和请求体重发。带鉴权的跨域上传跳转会被拒绝，避免客户端向同域代理重发鉴权时泄露给另一站点。
 - 清理 Cookie、Referer、客户端转发 IP、逐跳请求头，以及上游 Set-Cookie；所有本地错误都带 CORS 响应头。错误正文不回显请求 URL、签名或 Token。
 - 白名单拒绝返回 `403`，无效目标返回 `400`，前缀不匹配返回 `404`，上游连接或跳转失败返回 `502`，等待响应头超时返回 `504`。
 
@@ -120,7 +143,7 @@ npm run deploy
 
 [index.js](index.js) 是唯一维护的源码，保留中文注释和可编辑的配置区。`npm run build` 只生成 `dist/_worker.js`，**不会覆盖或改写 `index.js`**。手动部署直接复制 `index.js`；Pages 自动部署使用构建产物。历史实现可通过 Git 历史查看。
 
-`npm run check` 对 JavaScript 源码执行严格类型检查、构建和自动化测试，覆盖代码配置、可选环境变量、`/gh/` 和根路径、URL、白名单、Token、Git 请求体、重定向、压缩、HTML 改写、断点续传、超时和取消。`npm run test:browser` 另外验证页面初始化、异步内容、目录切换、刷新、前进后退、新标签页、表单和多级前缀。测试中的上游均为本地模拟，不需要 GitHub 或 Cloudflare 凭据。CI 分别验证新旧兼容日期，并执行 Wrangler 部署预检。
+`npm run check` 对 JavaScript 源码执行严格类型检查、构建和自动化测试，覆盖代码配置、可选环境变量、`/gh/` 和根路径、URL、白名单、Token、GitLab 子组与鉴权、`git.io` 解析、Git 请求体、重定向、压缩、HTML 改写、断点续传、超时和取消。`npm run test:browser` 另外验证页面初始化、异步内容、目录切换、刷新、前进后退、新标签页、表单和多级前缀。测试中的上游均为本地模拟，不需要 GitHub 或 Cloudflare 凭据。CI 分别验证新旧兼容日期，并执行 Wrangler 部署预检。
 
 ```sh
 npm run check

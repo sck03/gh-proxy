@@ -13,7 +13,7 @@
     "deploy": "wrangler deploy",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/worker.test.mjs tests/runtime.test.mjs",
+    "test": "npm run build && node --test tests/worker.test.mjs tests/sites.test.mjs tests/runtime.test.mjs",
     "test:browser": "npm run build && node --test tests/browser.test.mjs",
     "check": "npm run typecheck && npm test"
   },

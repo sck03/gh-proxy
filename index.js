@@ -14,7 +14,7 @@ const DEFAULTS = {
   // 如果希望首页跳转到其他网站，可填写 'https://example.com'。
   ASSET_URL: '',
 
-  // 3. 访问白名单：留空表示不限制 GitHub 路径。
+  // 3. 访问白名单：留空表示不限制 GitHub/GitLab 路径。
   // 多个关键词用英文逗号分隔，例如 '/username/repo/,/another/repo/'。
   WHITE_LIST: '',
 
@@ -45,6 +45,7 @@ const DEFAULTS = {
 
 // 仅代理这些完整域名。每次跳转也会检查，避免变成任意网站的开放代理。
 const ALLOWED_HOSTS = new Set([
+  'git.io', 'gitlab.com',
   'github.com', 'www.github.com', 'api.github.com', 'codeload.github.com',
   'raw.githubusercontent.com', 'gist.github.com', 'gist.githubusercontent.com',
   'objects.githubusercontent.com', 'release-assets.githubusercontent.com',
@@ -54,11 +55,16 @@ const ALLOWED_HOSTS = new Set([
   'github-production-release-asset-2e65be.s3.amazonaws.com',
 ]);
 
-// 客户端自带的鉴权只传给以下 GitHub 服务，不传给带签名的附件下载域名。
+// 客户端自带的 Authorization 只传给以下代码托管服务，不传给短链或附件下载域名。
 const AUTH_HOSTS = new Set([
+  'gitlab.com',
   'github.com', 'www.github.com', 'api.github.com',
   'raw.githubusercontent.com', 'gist.github.com', 'gist.githubusercontent.com',
 ]);
+
+// GitLab 的专用鉴权头仅能发送给 gitlab.com，跨域跳转时与 Authorization 一起清除。
+const GITLAB_AUTH_HEADERS = ['private-token', 'job-token', 'deploy-token'];
+const GITLAB_QUERY_TOKENS = ['private_token', 'access_token', 'job_token', 'deploy_token'];
 
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 const ALLOW_METHODS = METHODS.join(', ');
@@ -164,6 +170,24 @@ function allowed(url) {
 }
 
 /**
+ * 查询参数不参与白名单匹配；git.io 短链使用解析后的目标进行此检查。
+ * @param {URL} url
+ * @param {Env} env
+ */
+function pathAllowed(url, env) {
+  const configured = env.WHITE_LIST ?? DEFAULTS.WHITE_LIST;
+  if (!configured) return true;
+  const whitelist = configured.split(',').map(item => item.trim()).filter(Boolean);
+  let pathname = url.pathname;
+  try {
+    pathname = decodeURIComponent(pathname);
+  } catch {
+    // 非法编码按原始路径匹配。
+  }
+  return !whitelist.length || whitelist.some(item => pathname.includes(item) || url.hostname.includes(item));
+}
+
+/**
  * 补全协议，并兼容整个 URL 被编码一次的情况。
  * @param {string} value
  */
@@ -211,7 +235,7 @@ function fromReferer(request, url, prefix) {
 }
 
 /**
- * 将 GitHub blob 和 Gist 文件页面转成 Raw 下载地址。
+ * 将 GitHub/GitLab blob 和 Gist 文件页面转成 Raw 下载地址。
  * @param {URL} url
  */
 function fileTarget(url) {
@@ -220,6 +244,12 @@ function fileTarget(url) {
     if (blob) {
       url.hostname = 'raw.githubusercontent.com';
       url.pathname = `/${blob[1]}/${blob[2]}/${blob[3]}`;
+    }
+  } else if (url.hostname === 'gitlab.com') {
+    // 第一个 /-/ 分隔项目和操作；保留子组、分支和文件名中后续的 /-/blob/。
+    const separator = url.pathname.indexOf('/-/');
+    if (separator > 0 && url.pathname.startsWith('/-/blob/', separator)) {
+      url.pathname = url.pathname.slice(0, separator) + '/-/raw/' + url.pathname.slice(separator + 8);
     }
   } else if (url.hostname === 'gist.github.com') {
     const gist = /^\/([^/]+)\/([a-f\d]+)(?:\/([a-f\d]+))?\/?$/i.exec(url.pathname);
@@ -438,6 +468,9 @@ async function proxy(target, request, env, prefix) {
   if (!AUTH_HOSTS.has(target.hostname)) {
     headers.delete('authorization');
   }
+  if (target.hostname !== 'gitlab.com') {
+    for (const name of GITLAB_AUTH_HEADERS) headers.delete(name);
+  }
 
   // 环境变量优先；没有设置时，使用文件顶部填写的 Token。
   const ghToken = (env.GH_TOKEN ?? DEFAULTS.GH_TOKEN).trim();
@@ -452,15 +485,12 @@ async function proxy(target, request, env, prefix) {
     headers.set('user-agent', 'gh-proxy');
   }
 
-  const authenticated = headers.has('authorization');
+  let authenticated = headers.has('authorization') || GITLAB_AUTH_HEADERS.some(name => headers.has(name));
   const acceptEncoding = headers.get('accept-encoding');
   const validators = {
     'if-none-match': headers.get('if-none-match'),
     'if-modified-since': headers.get('if-modified-since'),
   };
-  if (authenticated) {
-    headers.set('cache-control', 'no-store');
-  }
 
   const configuredTimeout = Number(env.UPSTREAM_TIMEOUT_MS ?? DEFAULTS.UPSTREAM_TIMEOUT_MS);
   const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
@@ -472,6 +502,8 @@ async function proxy(target, request, env, prefix) {
   const timer = setTimeout(() => timeout.abort(), timeoutMs);
   try {
     for (let redirects = 0; ; redirects++) {
+      authenticated ||= target.hostname === 'gitlab.com' && GITLAB_QUERY_TOKENS.some(name => target.searchParams.has(name));
+      if (authenticated) headers.set('cache-control', 'no-store');
       const pageRequest = isPageRequest(request, target);
       // 旧兼容日期不能解码 Brotli HTML。页面协商 gzip，下载仍保留客户端的压缩协商。
       if (pageRequest) headers.set('accept-encoding', 'gzip');
@@ -506,9 +538,18 @@ async function proxy(target, request, env, prefix) {
           await discard(response);
           return reply(request, 'Upstream redirect target not allowed', 502);
         }
+        if (target.hostname === 'git.io' && next.hostname !== 'git.io' && !pathAllowed(next, env)) {
+          await discard(response);
+          return reply(request, 'Forbidden: path not in whitelist', 403);
+        }
 
         // 上传流不能重复读取，让 Git 等客户端自行按状态码处理重发。
         if (!readOnly) {
+          // 不同上游仍共用本站域名，客户端可能重发鉴权；此时不能返回跨站上传跳转。
+          if (authenticated && next.origin !== target.origin) {
+            await discard(response);
+            return reply(request, 'Authenticated cross-origin upload redirect not allowed', 502);
+          }
           const outgoing = responseHeaders(response, authenticated);
           outgoing.set('location', prefix + next.href);
           return new Response(response.body, {
@@ -526,6 +567,7 @@ async function proxy(target, request, env, prefix) {
         next = fileTarget(next);
         if (next.origin !== target.origin || !AUTH_HOSTS.has(next.hostname)) {
           headers.delete('authorization');
+          for (const name of GITLAB_AUTH_HEADERS) headers.delete(name);
         }
         target = next;
         continue;
@@ -562,7 +604,7 @@ export default {
     if (request.method === 'OPTIONS') {
       return reply(request, null, 204, {
         'access-control-allow-methods': ALLOW_METHODS,
-        'access-control-allow-headers': request.headers.get('access-control-request-headers') || 'Authorization, Content-Type, Range, Git-Protocol',
+        'access-control-allow-headers': request.headers.get('access-control-request-headers') || 'Authorization, Content-Type, Range, Git-Protocol, Private-Token, Job-Token, Deploy-Token',
         'access-control-max-age': '86400',
       });
     }
@@ -598,7 +640,7 @@ export default {
       return reply(request, HOME_PAGE, 200, { 'content-type': 'text/html; charset=utf-8' });
     }
 
-    // 去掉 /gh/ 等前缀后，剩余部分就是需要代理的 GitHub 地址。
+    // 去掉 /gh/ 等前缀后，剩余部分就是需要代理的地址。
     const inPrefix = url.pathname.startsWith(prefix);
     const path = inPrefix ? url.pathname.slice(prefix.length) + url.search : '';
     let target = inPrefix ? parseTarget(path) : null;
@@ -609,20 +651,9 @@ export default {
       return reply(request, inPrefix ? 'Invalid or unsupported target URL' : 'Not Found (Invalid Prefix)', inPrefix ? 400 : 404);
     }
 
-    // 空白关键词不会放行其他路径；查询参数不参与白名单匹配。
-    const configuredWhitelist = env.WHITE_LIST ?? DEFAULTS.WHITE_LIST;
-    if (configuredWhitelist) {
-      const whitelist = configuredWhitelist.split(',').map(item => item.trim()).filter(Boolean);
-      const hostname = target.hostname;
-      let pathname = target.pathname;
-      try {
-        pathname = decodeURIComponent(pathname);
-      } catch {
-        // 非法编码按原始路径匹配。
-      }
-      if (whitelist.length && !whitelist.some(item => pathname.includes(item) || hostname.includes(item))) {
-        return reply(request, 'Forbidden: path not in whitelist', 403);
-      }
+    // 短链先解析，再检查真实仓库路径；其他请求立即检查白名单。
+    if (target.hostname !== 'git.io' && !pathAllowed(target, env)) {
+      return reply(request, 'Forbidden: path not in whitelist', 403);
     }
 
     if (request.method === 'GET' || request.method === 'HEAD') {
