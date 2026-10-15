@@ -11,6 +11,11 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compatibility-date: ['2023-10-02', '2026-10-12']
+    env:
+      WORKER_COMPATIBILITY_DATE: ${{ matrix.compatibility-date }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,7 +24,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - name: Verify generated Worker is current
+      - name: Verify build preserves the editable source
         run: git diff --exit-code -- index.js
       - name: Validate Workers deployment bundle
         run: npx wrangler deploy --dry-run --outdir dist/wrangler

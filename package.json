@@ -4,7 +4,7 @@
   "description": "Optimized gh-proxy Cloudflare Worker",
   "private": true,
   "type": "module",
-  "main": "src/index.ts",
+  "main": "index.js",
   "engines": {
     "node": ">=22"
   },

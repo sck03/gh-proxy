@@ -24,9 +24,9 @@ test('Cloudflare runtime transfers bytes correctly', { timeout: 60_000 }, async 
   const runtime = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     scriptPath: fileURLToPath(new URL('../dist/_worker.js', import.meta.url)),
-    compatibilityDate: '2026-10-12',
+    compatibilityDate: process.env.WORKER_COMPATIBILITY_DATE || '2023-10-02',
     cf: false,
-    bindings: { GH_TOKEN: 'test-only-token', UPSTREAM_TIMEOUT_MS: '1000' },
+    bindings: { PREFIX: '/', GH_TOKEN: 'test-only-token', UPSTREAM_TIMEOUT_MS: '1000' },
     outboundService: { node: (request, response) => serve(request, response) },
   }));
   t.after(() => runtime.dispose());
@@ -138,5 +138,25 @@ test('Cloudflare runtime transfers bytes correctly', { timeout: 60_000 }, async 
     const result = await wireRequest(base, path);
     assert.equal(result.status, 200);
     assert.deepEqual(result.body, plaintext);
+  });
+
+  await t.test('the copied JavaScript serves /gh/ without environment variables', async (t) => {
+    const manual = new Miniflare(convertV4MiniflareOptions({
+      modules: true,
+      scriptPath: fileURLToPath(new URL('../index.js', import.meta.url)),
+      compatibilityDate: process.env.WORKER_COMPATIBILITY_DATE || '2023-10-02',
+      cf: false,
+      outboundService: { node: (request, response) => {
+        assert.equal(request.headers.authorization, undefined);
+        response.end('plain copy works');
+      } },
+    }));
+    t.after(() => manual.dispose());
+    const address = await manual.ready;
+    const response = await wireRequest(address, '/gh/https://github.com/owner/repo');
+    assert.equal(response.status, 200);
+    assert.equal(response.body.toString(), 'plain copy works');
+    assert.equal((await wireRequest(address, '/gh/')).status, 200);
+    assert.equal((await wireRequest(address, '/gh')).status, 200);
   });
 });

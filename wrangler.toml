@@ -1,12 +1,12 @@
 name = "gh-proxy"
-main = "src/index.ts"
-compatibility_date = "2026-10-12"
+main = "index.js"
+compatibility_date = "2023-10-02"
 
-# 环境变量配置 (可选)
-# 默认情况下，Worker 会使用内置的 HTML 首页，不需要配置 ASSET_URL
+# 可直接修改 index.js 顶部的 DEFAULTS，以下环境变量都不是必填项。
+# 同名环境变量会覆盖代码配置。普通使用无需配置 Token。
 [vars]
 # ASSET_URL = ""
-# PREFIX = "/"
+# PREFIX = "/gh/"
 # WHITE_LIST = ""
 # UPSTREAM_TIMEOUT_MS = "30000"
 
