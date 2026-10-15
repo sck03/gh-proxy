@@ -1,73 +1,89 @@
-# gh-proxy (Cloudflare Worker 优化版)
+# gh-proxy
 
-这是 [gh-proxy]的深度重构和优化版本，旨在提供更稳定、更隐私且易于部署的 GitHub 加速服务。完美支持 **Cloudflare Workers** 和 **Cloudflare Pages**。
+基于 [hunshcn/gh-proxy](https://github.com/hunshcn/gh-proxy) 改进的 GitHub 文件代理，可部署到 Cloudflare Workers 或 Pages。支持 Git clone/fetch、Raw 文件、Release 附件、源码压缩包、Gist 和 GitHub API。
 
-## ✨ 主要特性
+## 使用
 
-- **完全独立**: 内置轻量级 HTML 首页，不依赖任何外部资源。
-- **隐私增强**: 自动移除 Cookie、Referer、Origin 等敏感头，保护用户隐私。
-- **全能加速**: 支持 `git clone`、Raw 文件、Release 附件、Gist 以及 GitHub API 加速。
-- **智能修正**: 自动修正 `PREFIX` 配置错误、Referer 资源引用错误及 302 跳转。
-- **API 支持**: 支持加速 GitHub API 请求 (如 `https://api.github.com/...`)，并可通过 `GH_TOKEN` 解决限流问题。
-- **兼容性强**: 优化 Git 协议处理，解决 `RPC failed` 等兼容性问题。
+在 GitHub 地址前加上你的服务地址：
 
----
+```text
+https://你的域名/https://github.com/owner/repo/releases/download/v1.0/file.zip
+https://你的域名/https://github.com/owner/repo/blob/main/README.md
+https://你的域名/https://api.github.com/repos/owner/repo
+```
 
-## 🚀 部署指南
+```sh
+git clone https://你的域名/https://github.com/owner/repo.git
+```
 
-### 方法 1：Cloudflare Workers (最简单，适合手动)
+也支持省略目标协议，以及将整个目标 URL 编码一次的链接。普通链接中的路径编码、查询参数和下载签名保持原样。`blob` 文件地址和 Gist 文件页面会转换为 Raw 地址；GitHub 完整网页的脚本、登录和相对链接不保证兼容。
 
-如果你不需要 Git 版本控制，这是最快的方法：
+## 部署
 
-1. 打开项目根目录下的 [index.js](index.js) 文件。
-2. **全选并复制**所有代码。
-3. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)，进入 **Workers & Pages**。
-4. 点击 **Create Application** -> **Create Worker**。
-5. 在在线编辑器中，**覆盖**原有代码，粘贴你刚才复制的代码。
-6. 点击 **Deploy**。
+### Cloudflare Workers：手动复制
 
-### 方法 2：Cloudflare Pages (推荐，自动更新)
+1. 在 Cloudflare Dashboard 的 **Workers & Pages** 中创建 Worker。
+2. 将仓库根目录 [index.js](index.js) 的全部内容粘贴到编辑器并部署。
+3. 将运行时兼容日期设为 `2026-10-12` 或更晚；更新已有 Worker 时也需要检查此项。
+4. 在设置中添加需要的环境变量；`GH_TOKEN` 应保存为 Secret。
 
-如果你希望通过 Git 管理代码并自动部署：
+### Cloudflare Pages：Git 自动构建
 
-1. **Fork** 本仓库到你的 GitHub 账号。
-2. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)，进入 **Workers & Pages**。
-3. 点击 **Create Application** -> **Pages** -> **Connect to Git**。
-4. 选择你 Fork 的仓库。
-5. 在 **Build settings (构建设置)** 中填写：
-   - **Framework preset**: `None`
-   - **Build command (构建命令)**: `npm run build`
-   - **Build output directory (构建输出目录)**: `dist`
-6. 点击 **Save and Deploy**。
+连接本仓库或你的 Fork，选择以下构建设置：
 
-> **提示**: `index.js` 是为了方便手动复制而维护的纯 JS 版本，内容与 `src/index.ts` 编译后的 `dist/_worker.js` 逻辑一致。
+| 设置 | 值 |
+| --- | --- |
+| Framework preset | `None` |
+| Build command | `npm run build` |
+| Build output directory | `dist` |
+| Node.js | `24`（环境变量 `NODE_VERSION=24`） |
 
----
+构建生成 Pages 高级模式入口 `dist/_worker.js`。在 Pages 项目设置中配置运行时变量和 Secret，并将兼容日期设为 `2026-10-12` 或更晚。修改运行时配置后重新部署。
 
-## ⚙️ 环境变量配置
+### 本地开发与 Workers CLI
 
-你可以在 Cloudflare 的设置页面 (Settings -> Environment variables) 添加以下变量：
+需要 Node.js 22 或更高版本，推荐 Node.js 24。
 
-| 变量名 | 说明 | 默认值 | 示例 |
-| :--- | :--- | :--- | :--- |
-| `ASSET_URL` | 首页重定向地址。**默认为空**，直接显示内置的极简 HTML 页面。如果设置了网址，访问根目录时会跳到该网址。 | (空) | `https://example.com` |
-| `PREFIX` | 路径前缀。如果你的 Worker 部署在子路径下，请设置此项。程序会自动处理斜杠。 | `/` | `/gh/` |
-| `WHITE_LIST` | 访问白名单。如果设置，只有包含这些关键词的路径才允许访问。多个关键词用英文逗号 `,` 分隔。 | (空) | `username,repo-name` |
-| `GH_TOKEN` | GitHub Personal Access Token。用于解决 API 请求限流问题 (`API rate limit exceeded`)。建议使用无权限的 Token。 | (空) | `ghp_xxxx` |
+```sh
+npm ci
+npm run dev
+npm run check
+npm run deploy
+```
 
----
+本地密钥可放在 `.dev.vars` 中，该文件不会提交。生产 Token 使用 `npx wrangler secret put GH_TOKEN` 配置。
 
-## ❓ 常见问题 (FAQ)
+## 配置
 
-**Q: 访问 API 时提示 `API rate limit exceeded`？**
-A: 这是因为 GitHub 对未授权请求的 IP 限流。
-   - **解决**: 申请一个无权限的 [GitHub Personal Access Token](https://github.com/settings/tokens)，然后在 Cloudflare 环境变量中添加 `GH_TOKEN`，值为你的 Token。
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PREFIX` | `/` | 代理路径前缀，例如 `/gh/`。自动去掉首尾空格并补齐斜杠。使用时在此前缀后拼接完整目标 URL。 |
+| `ASSET_URL` | 空 | 仅用于首页的 HTTP/HTTPS 重定向；为空或无效时显示内置 Welcome 页面。不会用作其他地址的代理回退。 |
+| `WHITE_LIST` | 空 | 按目标主机名或解码后的路径进行关键词匹配，用英文逗号分隔，例如 `/owner/repo/,/another/repo/`。忽略空白项；查询参数不参与匹配。 |
+| `GH_TOKEN` | 空 | 仅在初始目标为 `api.github.com` 的 GET/HEAD 请求中补充鉴权；客户端已经携带 Authorization 时保留客户端值。 |
+| `UPSTREAM_TIMEOUT_MS` | `30000` | 从首次请求到最终响应头的总等待时间，包含上传和重定向；有效范围 1000–120000 毫秒，越界值限制到边界，无效值使用默认值。响应体下载不受此期限限制。 |
 
-**Q: `git clone` 时报错 `RPC failed` 或 Gist 乱码？**
-A: 本项目已针对这些问题进行了深度优化：
-   - **Git Clone**: 自动清理干扰 Git 客户端的 HTTP 头。
-   - **Gist 乱码**: 强制上游返回明文，由 Cloudflare 自动处理压缩，彻底解决乱码。
-   - **S3 签名错误**: 自动在访问 Release 附件时禁用 Token 注入，防止 AWS 鉴权冲突。
+`WHITE_LIST` 是关键词过滤，并非严格的仓库权限系统。例如允许 `/owner/repo/` 也可能匹配其他路径中相同的片段。读取请求经过过滤后可继续跟随受信任 GitHub 下载域名的跳转，因此 Release 的签名附件地址无需额外列入关键词。全部为空白的配置等同于未启用过滤。
 
-**Q: 使用 PREFIX (如 `/gh/`) 浏览 GitHub 页面时，为何有时会报错或一直加载？**
-A: 这是一个已知限制。建议将 Worker 部署在根目录（`PREFIX` 设为 `/`）以获得最佳体验。但最新版已加入 Referer 智能修正，能自动修复部分相对路径引用错误。
+`GH_TOKEN` 供服务访问者共享，只应使用无私有仓库权限、无写权限的 Token。服务端 Token 不会自动用于 POST/PUT/PATCH/DELETE，也不会注入 Raw、Git、Release 或 S3 下载。需要写入或私有仓库操作的调用者应自行提供 Authorization。跨域跳转会移除已有鉴权；带鉴权的响应禁止共享缓存。
+
+## 传输与错误处理
+
+- 请求体和响应体直接流式传输，不整包读取或复制大文件；保留 `Content-Encoding`、`Content-Length`、Range、ETag 和上游缓存语义，避免不必要的解压、重压缩。
+- GET/HEAD 在 Worker 内跟随最多 5 次受信任跳转，并取消丢弃的响应体；每一跳都校验 HTTPS、端口和完整域名。拒绝 URL 内嵌用户名或密码。
+- 带请求体的方法保留上游 301/302/303/307/308 状态，将 Location 改写为代理路径，由客户端处理重定向和请求体重发。
+- 清理 Cookie、Referer、客户端转发 IP、逐跳请求头，以及上游 Set-Cookie；所有本地错误都带 CORS 响应头。错误正文不回显请求 URL、签名或 Token。
+- 白名单拒绝返回 `403`，无效目标返回 `400`，前缀不匹配返回 `404`，上游连接或跳转失败返回 `502`，等待响应头超时返回 `504`。
+
+支持的完整主机名集中在 [src/index.ts](src/index.ts) 的 `ALLOWED_HOSTS` 中，包含 `release-assets.githubusercontent.com` 和旧版 GitHub Release S3 主机。不会任意跟随外部域名，也不会强制缓存私有响应。
+
+## 维护与验证
+
+[src/index.ts](src/index.ts) 是唯一维护的源码；`npm run build` 自动生成内容相同的根目录 `index.js` 和 `dist/_worker.js`。修改源码后提交生成的 `index.js`，不要手工维护第二份实现。历史实现可通过 Git 历史查看。
+
+`npm run check` 执行严格类型检查、构建和自动化测试，覆盖 URL、白名单、Token、Git 请求体、重定向、压缩、断点续传、超时和取消。测试中的上游均为本地模拟，不需要 GitHub 或 Cloudflare 凭据。CI 还检查生成文件是否同步，并执行 Wrangler 部署预检。
+
+```sh
+npm run check
+npx wrangler deploy --dry-run --outdir dist/wrangler
+```
